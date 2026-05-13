@@ -134,6 +134,12 @@ def export_fine_cut_to_draft(
             script.add_segment(text_segment, subtitle_track)
             text_segment_id = text_segment.segment_id
 
+        subtitle_contract = _build_subtitle_contract(
+            clip.text,
+            enabled=include_subtitles and bool(clip.text),
+            track_name=subtitle_track if include_subtitles else None,
+            segment_id=text_segment_id,
+        )
         manifest_clips.append(
             {
                 "index": clip.index,
@@ -152,6 +158,7 @@ def export_fine_cut_to_draft(
                     "allow_static": False,
                     "allow_silence": False,
                 },
+                "subtitle": subtitle_contract,
                 "video_segment_id": video_segment.segment_id,
                 "audio_segment_id": audio_segment.segment_id,
                 "text_segment_id": text_segment_id,
@@ -285,6 +292,51 @@ def _read_text(item: dict[str, Any]) -> str:
         if isinstance(value, str):
             return value.strip()
     return ""
+
+
+def _build_subtitle_contract(
+    text: str,
+    *,
+    enabled: bool,
+    track_name: str | None,
+    segment_id: str | None,
+) -> dict[str, Any]:
+    runs = [{"text": text, "role": "base", "style": "normal"}] if enabled and text else []
+    return {
+        "enabled": enabled,
+        "text": text if enabled else "",
+        "track": track_name,
+        "segment_id": segment_id,
+        "position": {
+            "anchor": "bottom_safe",
+            "transform_y": -0.78,
+            "safe_zone": {
+                "x_min": 0.08,
+                "x_max": 0.92,
+                "y_min": 0.68,
+                "y_max": 0.93,
+            },
+        },
+        "style": {
+            "preset": "wasabi_default_subtitle",
+            "font_size": 7.0,
+            "bold": True,
+            "color": "#FFFFFF",
+            "border_width": 35.0,
+            "shadow_alpha": 0.7,
+            "shadow_distance": 4.0,
+            "auto_wrapping": True,
+        },
+        "runs": runs,
+        "emphasis_runs": [],
+        "decorative_text": [],
+        "checks": {
+            "require_visible": enabled,
+            "check_safe_zone": enabled,
+            "check_emphasis_visual": False,
+            "ocr_required": False,
+        },
+    }
 
 
 def _write_manifest(path: Path, data: dict[str, Any]) -> None:

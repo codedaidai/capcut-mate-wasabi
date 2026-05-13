@@ -109,4 +109,13 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
         "allow_static": False,
         "allow_silence": False,
     }
+    subtitle = manifest["clips"][0]["subtitle"]
+    assert subtitle["enabled"] is True
+    assert subtitle["text"] == "hello"
+    assert subtitle["position"]["anchor"] == "bottom_safe"
+    assert subtitle["style"]["preset"] == "wasabi_default_subtitle"
+    assert subtitle["runs"] == [{"text": "hello", "role": "base", "style": "normal"}]
+    assert subtitle["emphasis_runs"] == []
+    assert subtitle["decorative_text"] == []
+    assert subtitle["checks"]["ocr_required"] is False
     assert (drafts / "demo" / "timeline_review.md").exists()

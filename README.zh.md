@@ -106,6 +106,8 @@ uv run python -m src.wasabi_jianying.cli \
 - `wasabi_manifest.json`：机器使用，记录每一句对应的时间范围和素材片段 ID
 - `timeline_review.md`：人使用，可在 Codex App 里标注剪辑意见
 
+`wasabi_manifest.json` 里还会为每一句写入 `subtitle` 字幕合同，记录字幕文本、位置、安全区、基础样式、重点字和花字的预留结构。字幕验片不会把 OCR 当硬判定，`ocr_required` 默认是 `false`。
+
 可以打开 `timeline_review.md`，在对应片段的标注区写：
 
 ```md
@@ -132,6 +134,8 @@ uv run python -m src.wasabi_jianying.apply_effect \
 ### Wasabi 导出成片验片
 
 剪映导出低清代理 MP4 后，可以用 `wasabi_manifest.json` 对成片做逐句验片。第一版会检查导出时长、分辨率、源素材是否存在、每句是否黑屏、是否静帧卡住、是否大面积静音，并抽取每句的开头/中间/结尾截图生成报告。
+
+报告会展示每句的字幕合同摘要，包括位置、样式、runs、重点字、花字和 OCR 是否被要求硬判。花字/重点字字幕优先走工程合同和画面呈现检查，OCR 只适合作为弱参考。
 
 ```bash
 uv run python -m src.wasabi_jianying.verify_export \

@@ -51,6 +51,7 @@ class ClipQCResult:
     duration: float
     end: float
     text: str
+    subtitle: dict[str, Any]
     status: str
     issues: list[QCIssue]
     frames: list[Path]
@@ -156,6 +157,7 @@ def _verify_clip(
     video_path = str(clip.get("video_path", ""))
     audio_path = str(clip.get("audio_path", ""))
     checks = clip.get("checks") if isinstance(clip.get("checks"), dict) else {}
+    subtitle = _read_subtitle_contract(clip, text)
 
     issues: list[QCIssue] = []
     if duration <= 0:
@@ -164,6 +166,7 @@ def _verify_clip(
         issues.append(QCIssue("fail", "CLIP_OUTSIDE_EXPORT", "片段结束时间超过导出视频总时长。"))
 
     _check_source_media(issues, video_path, audio_path, duration, ffprobe)
+    _check_subtitle_contract(issues, subtitle)
 
     frames = _extract_preview_frames(export_path, index, start, duration, frames_dir, ffmpeg) if export_probe.has_video else []
     if export_probe.has_video and duration > 0:
@@ -221,6 +224,7 @@ def _verify_clip(
         duration=duration,
         end=end,
         text=text,
+        subtitle=subtitle,
         status=status,
         issues=issues,
         frames=frames,
@@ -286,6 +290,50 @@ def _check_source_media(
                     f"源音频 {source_audio.duration:.2f}s，片段预期 {expected_duration:.2f}s。",
                 )
             )
+
+
+def _read_subtitle_contract(clip: dict[str, Any], fallback_text: str) -> dict[str, Any]:
+    raw = clip.get("subtitle")
+    if isinstance(raw, dict):
+        return raw
+    return {
+        "enabled": bool(fallback_text),
+        "text": fallback_text,
+        "legacy": True,
+        "runs": [{"text": fallback_text, "role": "base", "style": "normal"}] if fallback_text else [],
+        "emphasis_runs": [],
+        "decorative_text": [],
+        "checks": {
+            "require_visible": bool(fallback_text),
+            "check_safe_zone": bool(fallback_text),
+            "check_emphasis_visual": False,
+            "ocr_required": False,
+        },
+    }
+
+
+def _check_subtitle_contract(issues: list[QCIssue], subtitle: dict[str, Any]) -> None:
+    if not subtitle.get("enabled", False):
+        return
+    text = str(subtitle.get("text", "")).strip()
+    if not text:
+        issues.append(QCIssue("fail", "SUBTITLE_TEXT_EMPTY", "字幕合同已启用，但字幕文本为空。"))
+
+    is_legacy = bool(subtitle.get("legacy", False))
+    if not subtitle.get("segment_id") and not is_legacy:
+        issues.append(QCIssue("fail", "SUBTITLE_SEGMENT_MISSING", "字幕合同已启用，但没有字幕片段 ID。"))
+
+    runs = subtitle.get("runs", [])
+    if isinstance(runs, list) and runs:
+        joined = "".join(str(run.get("text", "")) for run in runs if isinstance(run, dict))
+        if _normalize_text(joined) != _normalize_text(text):
+            issues.append(QCIssue("warn", "SUBTITLE_RUNS_MISMATCH", "字幕分段 runs 和完整字幕文本不一致。"))
+    elif text:
+        issues.append(QCIssue("warn", "SUBTITLE_RUNS_EMPTY", "字幕合同没有 runs，后续无法精确检查重点字/花字。"))
+
+    checks = subtitle.get("checks") if isinstance(subtitle.get("checks"), dict) else {}
+    if checks.get("ocr_required", False):
+        issues.append(QCIssue("warn", "SUBTITLE_OCR_REQUIRED", "字幕合同要求 OCR；花字字幕不建议把 OCR 当硬判定。"))
 
 
 def _extract_preview_frames(
@@ -469,6 +517,8 @@ def _write_html_report(path: Path, result: ExportVerificationResult, export_prob
     img {{ width: 150px; margin-right: 6px; border: 1px solid #d0d7de; }}
     code {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
     .text {{ max-width: 360px; }}
+    .subtitle {{ max-width: 300px; }}
+    .small {{ color: #57606a; font-size: 12px; }}
   </style>
 </head>
 <body>
@@ -494,6 +544,7 @@ def _write_html_report(path: Path, result: ExportVerificationResult, export_prob
         <th>时间</th>
         <th>状态</th>
         <th>文案</th>
+        <th>字幕合同</th>
         <th>截图</th>
         <th>问题</th>
       </tr>
@@ -519,6 +570,7 @@ def _render_clip_row(clip: ClipQCResult, base_dir: Path) -> str:
   <td>{_format_seconds(clip.start)} - {_format_seconds(clip.end)}<br>{clip.duration:.2f}s</td>
   <td class="{clip.status}">{_status_label(clip.status)}</td>
   <td class="text">{html.escape(clip.text)}</td>
+  <td class="subtitle">{_render_subtitle(clip.subtitle)}</td>
   <td>{frames}</td>
   <td><ul>{issues}</ul></td>
 </tr>"""
@@ -535,6 +587,7 @@ def _clip_to_dict(clip: ClipQCResult, base_dir: Path) -> dict[str, Any]:
         "duration": clip.duration,
         "end": clip.end,
         "text": clip.text,
+        "subtitle": clip.subtitle,
         "status": clip.status,
         "video_path": clip.video_path,
         "audio_path": clip.audio_path,
@@ -545,6 +598,26 @@ def _clip_to_dict(clip: ClipQCResult, base_dir: Path) -> dict[str, Any]:
 
 def _issue_to_dict(issue: QCIssue) -> dict[str, str]:
     return {"severity": issue.severity, "code": issue.code, "message": issue.message}
+
+
+def _render_subtitle(subtitle: dict[str, Any]) -> str:
+    if not subtitle.get("enabled", False):
+        return '<span class="small">关闭</span>'
+    checks = subtitle.get("checks") if isinstance(subtitle.get("checks"), dict) else {}
+    position = subtitle.get("position") if isinstance(subtitle.get("position"), dict) else {}
+    style = subtitle.get("style") if isinstance(subtitle.get("style"), dict) else {}
+    runs = subtitle.get("runs") if isinstance(subtitle.get("runs"), list) else []
+    emphasis = subtitle.get("emphasis_runs") if isinstance(subtitle.get("emphasis_runs"), list) else []
+    decorative = subtitle.get("decorative_text") if isinstance(subtitle.get("decorative_text"), list) else []
+    rows = [
+        f"位置：{html.escape(str(position.get('anchor', 'unknown')))}",
+        f"样式：{html.escape(str(style.get('preset', 'unknown')))}",
+        f"runs：{len(runs)}",
+        f"重点字：{len(emphasis)}",
+        f"花字：{len(decorative)}",
+        f"OCR硬判：{'是' if checks.get('ocr_required', False) else '否'}",
+    ]
+    return "<br>".join(f'<span class="small">{row}</span>' for row in rows)
 
 
 def _status_from_issues(issues: list[QCIssue]) -> str:
@@ -601,6 +674,10 @@ def _relative_path(path: Path, base_dir: Path) -> str:
         return str(path.relative_to(base_dir))
     except ValueError:
         return str(path)
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", "", value)
 
 
 def main() -> None:

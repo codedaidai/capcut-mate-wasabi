@@ -87,3 +87,60 @@ def test_verify_export_video_writes_reports_and_flags_black_clip(tmp_path, monke
 
     payload = json.loads(result.json_path.read_text(encoding="utf-8"))
     assert payload["clips"][1]["issues"][0]["code"] == "BLACK_SCREEN"
+    assert payload["clips"][0]["subtitle"]["checks"]["ocr_required"] is False
+
+
+def test_verify_export_warns_when_subtitle_contract_requires_ocr(tmp_path, monkeypatch):
+    export = tmp_path / "export.mp4"
+    export.write_bytes(b"mp4")
+    source_video = tmp_path / "seg_00.mp4"
+    source_video.write_bytes(b"video")
+    source_audio = tmp_path / "sent_00.wav"
+    source_audio.write_bytes(b"audio")
+    manifest = tmp_path / "wasabi_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "draft_name": "demo",
+                "duration": 2_000_000,
+                "width": 1920,
+                "height": 1080,
+                "clips": [
+                    {
+                        "index": 0,
+                        "text": "花字字幕",
+                        "start": 0,
+                        "duration": 2_000_000,
+                        "end": 2_000_000,
+                        "video_path": str(source_video),
+                        "audio_path": str(source_audio),
+                        "checks": {"allow_black": False, "allow_static": False, "allow_silence": False},
+                        "subtitle": {
+                            "enabled": True,
+                            "text": "花字字幕",
+                            "segment_id": "text-1",
+                            "runs": [{"text": "花字字幕", "role": "base", "style": "normal"}],
+                            "emphasis_runs": [{"text": "花字", "style": "emphasis_red_pop"}],
+                            "decorative_text": [{"text": "字幕", "style": "sticker_pop"}],
+                            "checks": {"ocr_required": True},
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_probe(path: Path, ffprobe: str) -> MediaProbe:
+        return MediaProbe(path=path, duration=2.0, width=1920, height=1080, fps=30.0, has_video=True, has_audio=True)
+
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._probe_media", fake_probe)
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._sum_detector_durations", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_preview_frames", lambda *args, **kwargs: [])
+
+    result = verify_export_video(export, manifest)
+
+    assert result.warning_count == 1
+    assert result.clip_results[0].issues[0].code == "SUBTITLE_OCR_REQUIRED"
