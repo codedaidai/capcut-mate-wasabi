@@ -129,6 +129,22 @@ uv run python -m src.wasabi_jianying.apply_effect \
   --clips 0,3,7
 ```
 
+### Wasabi 导出成片验片
+
+剪映导出低清代理 MP4 后，可以用 `wasabi_manifest.json` 对成片做逐句验片。第一版会检查导出时长、分辨率、源素材是否存在、每句是否黑屏、是否静帧卡住、是否大面积静音，并抽取每句的开头/中间/结尾截图生成报告。
+
+```bash
+uv run python -m src.wasabi_jianying.verify_export \
+  /path/to/export_proxy.mp4 \
+  --manifest /path/to/JianyingPro\ Drafts/my_wasabi_draft/wasabi_manifest.json
+```
+
+默认会在草稿目录生成：
+
+- `qc_report.html`：给人看的验片报告，包含逐句状态、问题和截图
+- `qc_report.json`：给 Codex 后续自动修草稿使用的结构化结果
+- `qc_frames/`：每句抽出的检查帧
+
 ### Docker 部署
 
 #### 快速部署（推荐）

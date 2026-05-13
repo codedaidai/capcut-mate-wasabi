@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from src.wasabi_jianying.export_fine_cut import export_fine_cut_to_draft, load_fine_cut_clips
@@ -100,5 +101,12 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
     assert ("save",) in calls
     segment_tracks = [call[1] for call in calls if call[0] == "segment"]
     assert segment_tracks == ["wasabi_video", "wasabi_tts", "wasabi_subtitles"]
-    assert (drafts / "demo" / "wasabi_manifest.json").exists()
+    manifest = json.loads((drafts / "demo" / "wasabi_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["clips"][0]["source_video_duration"] == 2_000_000
+    assert manifest["clips"][0]["source_audio_duration"] == 2_000_000
+    assert manifest["clips"][0]["checks"] == {
+        "allow_black": False,
+        "allow_static": False,
+        "allow_silence": False,
+    }
     assert (drafts / "demo" / "timeline_review.md").exists()
