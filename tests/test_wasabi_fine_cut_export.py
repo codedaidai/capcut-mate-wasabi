@@ -93,6 +93,7 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
 
     assert result.draft_path == drafts / "demo"
     assert result.manifest_path == drafts / "demo" / "wasabi_manifest.json"
+    assert result.review_path == drafts / "demo" / "timeline_review.md"
     assert result.clips_count == 1
     assert result.duration_us == 2_000_000
     assert ("create", str(drafts.resolve()), "demo", 1920, 1080, 30, True) in calls
@@ -100,3 +101,4 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
     segment_tracks = [call[1] for call in calls if call[0] == "segment"]
     assert segment_tracks == ["wasabi_video", "wasabi_tts", "wasabi_subtitles"]
     assert (drafts / "demo" / "wasabi_manifest.json").exists()
+    assert (drafts / "demo" / "timeline_review.md").exists()

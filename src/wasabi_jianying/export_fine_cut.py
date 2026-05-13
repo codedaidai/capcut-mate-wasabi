@@ -11,6 +11,8 @@ from typing import Any, Iterable
 
 import src.pyJianYingDraft as draft
 
+from .review import write_timeline_review
+
 
 SEC = 1_000_000
 
@@ -28,6 +30,7 @@ class ExportResult:
     draft_name: str
     draft_path: Path
     manifest_path: Path
+    review_path: Path
     clips_count: int
     duration_us: int
 
@@ -169,10 +172,12 @@ def export_fine_cut_to_draft(
             "clips": manifest_clips,
         },
     )
+    review_path = write_timeline_review(draft_path, manifest_path=manifest_path)
     return ExportResult(
         draft_name=name,
         draft_path=draft_path,
         manifest_path=manifest_path,
+        review_path=review_path,
         clips_count=len(clips),
         duration_us=cursor_us,
     )

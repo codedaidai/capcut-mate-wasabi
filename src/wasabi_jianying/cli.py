@@ -34,6 +34,7 @@ def main() -> None:
     print(f"Name: {result.draft_name}")
     print(f"Path: {result.draft_path}")
     print(f"Manifest: {result.manifest_path}")
+    print(f"Review: {result.review_path}")
     print(f"Clips: {result.clips_count}")
     print(f"Duration: {result.duration_seconds:.1f}s")
 
