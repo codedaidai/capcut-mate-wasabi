@@ -80,6 +80,27 @@ uv run main.py
 4. 访问API文档
 启动后访问 http://localhost:30000/docs 查看自动生成的交互式API文档
 
+### Wasabi 本地剪映草稿导出
+
+这个 fork 额外提供了一个本地入口，不需要启动 API 服务，也不需要上传素材。它会直接读取 wasabi-editor 的 `fine_cut` 输出目录，生成剪映可以打开的草稿工程。
+
+输入目录需要包含：
+
+- `segments/seg_00.mp4`、`segments/seg_01.mp4` ...
+- `tts/sent_00.wav`、`tts/sent_01.wav` ...
+- `sentences.json`
+
+运行示例：
+
+```bash
+uv run python -m src.wasabi_jianying.cli \
+  /path/to/fine_cut \
+  --drafts-folder /path/to/JianyingPro\ Drafts \
+  --draft-name my_wasabi_draft
+```
+
+输出草稿包含三条轨道：静音视频轨、TTS 配音轨、字幕轨。视频时长会按对应 TTS 时长对齐，适合让 AI 先自动铺好粗剪，再进剪映人工精修。
+
 ### Docker 部署
 
 #### 快速部署（推荐）
