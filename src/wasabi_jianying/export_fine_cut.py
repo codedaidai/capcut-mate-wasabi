@@ -335,6 +335,10 @@ def _build_subtitle_contract(
             "check_safe_zone": enabled,
             "check_emphasis_visual": False,
             "ocr_required": False,
+            "min_text_edge_density": 0.004,
+            "min_safe_difference": 0.012,
+            "min_difference_lift": 1.25,
+            "max_outside_to_safe_ratio": 0.75,
         },
     }
 

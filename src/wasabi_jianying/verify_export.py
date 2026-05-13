@@ -52,6 +52,7 @@ class ClipQCResult:
     end: float
     text: str
     subtitle: dict[str, Any]
+    subtitle_visual: dict[str, Any]
     status: str
     issues: list[QCIssue]
     frames: list[Path]
@@ -74,7 +75,8 @@ class ExportVerificationResult:
 
     @property
     def passed(self) -> bool:
-        return self.failed_count == 0 and not any(issue.severity == "fail" for issue in self.project_issues)
+        project_needs_attention = any(issue.severity in {"fail", "warn"} for issue in self.project_issues)
+        return self.failed_count == 0 and self.warning_count == 0 and not project_needs_attention
 
 
 def verify_export_video(
@@ -169,6 +171,13 @@ def _verify_clip(
     _check_subtitle_contract(issues, subtitle)
 
     frames = _extract_preview_frames(export_path, index, start, duration, frames_dir, ffmpeg) if export_probe.has_video else []
+    source_start = _us_to_seconds(int(clip.get("source_video_start", 0)))
+    reference_frames = (
+        _extract_reference_frames(Path(video_path), index, source_start, duration, frames_dir, ffmpeg)
+        if export_probe.has_video and subtitle.get("enabled", False) and video_path and Path(video_path).exists()
+        else []
+    )
+    subtitle_visual = _check_subtitle_visual(issues, subtitle, frames, reference_frames)
     if export_probe.has_video and duration > 0:
         black_duration = _sum_detector_durations(
             export_path,
@@ -225,6 +234,7 @@ def _verify_clip(
         end=end,
         text=text,
         subtitle=subtitle,
+        subtitle_visual=subtitle_visual,
         status=status,
         issues=issues,
         frames=frames,
@@ -336,6 +346,244 @@ def _check_subtitle_contract(issues: list[QCIssue], subtitle: dict[str, Any]) ->
         issues.append(QCIssue("warn", "SUBTITLE_OCR_REQUIRED", "字幕合同要求 OCR；花字字幕不建议把 OCR 当硬判定。"))
 
 
+def _check_subtitle_visual(
+    issues: list[QCIssue],
+    subtitle: dict[str, Any],
+    frames: list[Path],
+    reference_frames: list[Path],
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {
+        "enabled": bool(subtitle.get("enabled", False)),
+        "checked": False,
+        "visible": None,
+        "safe_zone_ok": None,
+        "frames": [],
+    }
+    if not subtitle.get("enabled", False):
+        return metrics
+
+    checks = subtitle.get("checks") if isinstance(subtitle.get("checks"), dict) else {}
+    require_visible = bool(checks.get("require_visible", False))
+    check_safe_zone = bool(checks.get("check_safe_zone", False))
+    min_edge_density = float(checks.get("min_text_edge_density", 0.004))
+    min_safe_difference = float(checks.get("min_safe_difference", 0.012))
+    min_difference_lift = float(checks.get("min_difference_lift", 1.25))
+    max_outside_to_safe_ratio = float(checks.get("max_outside_to_safe_ratio", 0.75))
+    min_outside_edge_density = float(checks.get("min_outside_edge_density", 0.004))
+    metrics.update(
+        {
+            "thresholds": {
+                "min_text_edge_density": min_edge_density,
+                "min_safe_difference": min_safe_difference,
+                "min_difference_lift": min_difference_lift,
+                "max_outside_to_safe_ratio": max_outside_to_safe_ratio,
+                "min_outside_edge_density": min_outside_edge_density,
+            },
+        }
+    )
+
+    if not frames:
+        if require_visible:
+            issues.append(QCIssue("warn", "SUBTITLE_FRAMES_MISSING", "没有可用于字幕画面检查的抽帧。"))
+        return metrics
+
+    frame_metrics: list[dict[str, Any]] = []
+    for index, frame in enumerate(frames):
+        reference_frame = reference_frames[index] if index < len(reference_frames) else None
+        try:
+            frame_metrics.append(_analyze_subtitle_frame(frame, subtitle, reference_frame=reference_frame))
+        except Exception as exc:  # pragma: no cover - defensive around image backend quirks.
+            issues.append(QCIssue("warn", "SUBTITLE_FRAME_READ_FAILED", f"字幕检查帧读取失败：{frame.name}：{exc}"))
+
+    if not frame_metrics:
+        if require_visible:
+            issues.append(QCIssue("warn", "SUBTITLE_VISUAL_CHECK_EMPTY", "字幕画面检查没有得到有效帧。"))
+        return metrics
+
+    max_safe_density = max(float(item["safe_edge_density"]) for item in frame_metrics)
+    max_outside_density = max(float(item["outside_edge_density"]) for item in frame_metrics)
+    max_outside_edge_ratio = max(float(item["outside_to_safe_edge_ratio"]) for item in frame_metrics)
+    diff_metrics = [item for item in frame_metrics if item.get("has_reference")]
+    has_reference = bool(diff_metrics)
+    max_safe_difference = max((float(item["safe_difference"]) for item in diff_metrics), default=0.0)
+    max_difference_lift = max((float(item["safe_difference_lift"]) for item in diff_metrics), default=0.0)
+    max_outside_difference = max((float(item["outside_difference"]) for item in diff_metrics), default=0.0)
+    max_outside_difference_ratio = max((float(item["outside_to_safe_difference_ratio"]) for item in diff_metrics), default=0.0)
+    visible = (
+        max_safe_difference >= min_safe_difference and max_difference_lift >= min_difference_lift
+        if has_reference
+        else max_safe_density >= min_edge_density
+    )
+    outside_ratio = max_outside_difference_ratio if has_reference else max_outside_edge_ratio
+    outside_activity = max_outside_difference if has_reference else max_outside_density
+    safe_zone_ok = not (outside_activity >= min_outside_edge_density and outside_ratio > max_outside_to_safe_ratio)
+
+    metrics.update(
+        {
+            "checked": True,
+            "visible": visible,
+            "safe_zone_ok": safe_zone_ok,
+            "has_reference": has_reference,
+            "max_safe_edge_density": max_safe_density,
+            "max_outside_edge_density": max_outside_density,
+            "max_outside_to_safe_edge_ratio": max_outside_edge_ratio,
+            "max_safe_difference": max_safe_difference,
+            "max_difference_lift": max_difference_lift,
+            "max_outside_difference": max_outside_difference,
+            "max_outside_to_safe_difference_ratio": max_outside_difference_ratio,
+            "frames": frame_metrics,
+        }
+    )
+
+    if require_visible and not visible:
+        issues.append(
+            QCIssue(
+                "warn",
+                "SUBTITLE_VISIBILITY_LOW",
+                f"字幕安全区变化偏低，最大差异 {max_safe_difference:.4f}，差异抬升 {max_difference_lift:.2f}。",
+            )
+        )
+    if check_safe_zone and not safe_zone_ok:
+        issues.append(
+            QCIssue(
+                "warn",
+                "SUBTITLE_SAFE_ZONE_ACTIVITY",
+                f"字幕安全区外也有较强疑似字幕活动，外侧/内侧比例 {outside_ratio:.2f}。",
+            )
+        )
+    return metrics
+
+
+def _analyze_subtitle_frame(frame: Path, subtitle: dict[str, Any], *, reference_frame: Path | None = None) -> dict[str, Any]:
+    gray = _read_gray_image(frame)
+    height, width = gray.shape
+    edge_threshold = _subtitle_edge_threshold(subtitle)
+    edges = _edge_map(gray, edge_threshold)
+    x1, y1, x2, y2 = _safe_zone_bounds(width, height, subtitle)
+    safe_area = max((x2 - x1) * (y2 - y1), 1)
+    safe_edges = int(edges[y1:y2, x1:x2].sum())
+
+    pad_x = max(int(width * 0.05), 1)
+    pad_top = max(int(height * 0.12), 1)
+    pad_bottom = max(int(height * 0.05), 1)
+    cx1 = max(0, x1 - pad_x)
+    cx2 = min(width, x2 + pad_x)
+    cy1 = max(0, y1 - pad_top)
+    cy2 = min(height, y2 + pad_bottom)
+    canvas = edges[cy1:cy2, cx1:cx2]
+    outside = canvas.copy()
+    sx1 = x1 - cx1
+    sx2 = x2 - cx1
+    sy1 = y1 - cy1
+    sy2 = y2 - cy1
+    outside[sy1:sy2, sx1:sx2] = False
+    outside_area = max(canvas.size - safe_area, 1)
+    outside_edges = int(outside.sum())
+
+    safe_density = safe_edges / safe_area
+    outside_density = outside_edges / outside_area
+    result = {
+        "frame": frame.name,
+        "width": width,
+        "height": height,
+        "safe_zone_px": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+        "safe_edge_density": safe_density,
+        "outside_edge_density": outside_density,
+        "outside_to_safe_edge_ratio": outside_density / max(safe_density, 1e-6),
+        "has_reference": False,
+    }
+    if reference_frame and reference_frame.exists():
+        reference = _read_gray_image(reference_frame)
+        gray, reference = _align_gray_images(gray, reference)
+        safe_diff = _mean_abs_diff(gray[y1:y2, x1:x2], reference[y1:y2, x1:x2])
+        global_diff = _mean_abs_diff(gray, reference)
+        reference_canvas = reference[cy1:cy2, cx1:cx2]
+        gray_canvas = gray[cy1:cy2, cx1:cx2]
+        outside_diff = _mean_abs_diff(
+            _outside_region(gray_canvas, sx1, sy1, sx2, sy2),
+            _outside_region(reference_canvas, sx1, sy1, sx2, sy2),
+        )
+        result.update(
+            {
+                "reference_frame": reference_frame.name,
+                "has_reference": True,
+                "safe_difference": safe_diff,
+                "global_difference": global_diff,
+                "safe_difference_lift": safe_diff / max(global_diff, 1e-6),
+                "outside_difference": outside_diff,
+                "outside_to_safe_difference_ratio": outside_diff / max(safe_diff, 1e-6),
+            }
+        )
+    return result
+
+
+def _read_gray_image(path: Path):
+    import imageio.v3 as iio
+    import numpy as np
+
+    image = np.asarray(iio.imread(path))
+    if image.ndim == 2:
+        return image.astype("float32")
+    if image.ndim == 3 and image.shape[2] >= 3:
+        rgb = image[:, :, :3].astype("float32")
+        return rgb[:, :, 0] * 0.299 + rgb[:, :, 1] * 0.587 + rgb[:, :, 2] * 0.114
+    raise ValueError(f"Unsupported image shape: {image.shape}")
+
+
+def _edge_map(gray, threshold: float):
+    import numpy as np
+
+    edges = np.zeros(gray.shape, dtype=bool)
+    edges[:, 1:] |= np.abs(gray[:, 1:] - gray[:, :-1]) >= threshold
+    edges[1:, :] |= np.abs(gray[1:, :] - gray[:-1, :]) >= threshold
+    return edges
+
+
+def _align_gray_images(left, right):
+    height = min(left.shape[0], right.shape[0])
+    width = min(left.shape[1], right.shape[1])
+    return left[:height, :width], right[:height, :width]
+
+
+def _mean_abs_diff(left, right) -> float:
+    import numpy as np
+
+    if left.size == 0 or right.size == 0:
+        return 0.0
+    return float(np.mean(np.abs(left.astype("float32") - right.astype("float32"))) / 255.0)
+
+
+def _outside_region(canvas, sx1: int, sy1: int, sx2: int, sy2: int):
+    import numpy as np
+
+    mask = np.ones(canvas.shape, dtype=bool)
+    mask[sy1:sy2, sx1:sx2] = False
+    return canvas[mask]
+
+
+def _safe_zone_bounds(width: int, height: int, subtitle: dict[str, Any]) -> tuple[int, int, int, int]:
+    position = subtitle.get("position") if isinstance(subtitle.get("position"), dict) else {}
+    safe_zone = position.get("safe_zone") if isinstance(position.get("safe_zone"), dict) else {}
+    x_min = _clamp_float(safe_zone.get("x_min", 0.08), 0.0, 1.0)
+    x_max = _clamp_float(safe_zone.get("x_max", 0.92), 0.0, 1.0)
+    y_min = _clamp_float(safe_zone.get("y_min", 0.68), 0.0, 1.0)
+    y_max = _clamp_float(safe_zone.get("y_max", 0.93), 0.0, 1.0)
+    if x_max <= x_min:
+        x_min, x_max = 0.08, 0.92
+    if y_max <= y_min:
+        y_min, y_max = 0.68, 0.93
+    x1 = int(round(width * x_min))
+    x2 = int(round(width * x_max))
+    y1 = int(round(height * y_min))
+    y2 = int(round(height * y_max))
+    return max(0, x1), max(0, y1), min(width, max(x2, x1 + 1)), min(height, max(y2, y1 + 1))
+
+
+def _subtitle_edge_threshold(subtitle: dict[str, Any]) -> float:
+    checks = subtitle.get("checks") if isinstance(subtitle.get("checks"), dict) else {}
+    return float(checks.get("edge_threshold", 28.0))
+
+
 def _extract_preview_frames(
     export_path: Path,
     clip_index: int,
@@ -346,14 +594,9 @@ def _extract_preview_frames(
 ) -> list[Path]:
     if duration <= 0:
         return []
-    offsets = [
-        min(0.2, duration * 0.25),
-        duration * 0.5,
-        max(duration - min(0.2, duration * 0.25), 0.0),
-    ]
     frames: list[Path] = []
     seen: set[int] = set()
-    for label, offset in zip(("start", "mid", "end"), offsets):
+    for label, offset in _preview_offsets(duration):
         timestamp = max(start + offset, 0.0)
         marker = int(round(timestamp * 1000))
         if marker in seen:
@@ -381,6 +624,57 @@ def _extract_preview_frames(
         if output.exists():
             frames.append(output)
     return frames
+
+
+def _extract_reference_frames(
+    source_path: Path,
+    clip_index: int,
+    source_start: float,
+    duration: float,
+    frames_dir: Path,
+    ffmpeg: str,
+) -> list[Path]:
+    if duration <= 0:
+        return []
+    frames: list[Path] = []
+    seen: set[int] = set()
+    for label, offset in _preview_offsets(duration):
+        timestamp = max(source_start + offset, 0.0)
+        marker = int(round(timestamp * 1000))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        output = frames_dir / f"clip_{clip_index:03d}_source_{label}.jpg"
+        command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-ss",
+            f"{timestamp:.3f}",
+            "-i",
+            str(source_path),
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=480:-1",
+            "-y",
+            str(output),
+        ]
+        _run_command(command)
+        if output.exists():
+            frames.append(output)
+    return frames
+
+
+def _preview_offsets(duration: float) -> list[tuple[str, float]]:
+    edge_offset = min(0.2, duration * 0.25)
+    return [
+        ("start", edge_offset),
+        ("mid", duration * 0.5),
+        ("end", max(duration - edge_offset, 0.0)),
+    ]
 
 
 def _sum_detector_durations(
@@ -570,7 +864,7 @@ def _render_clip_row(clip: ClipQCResult, base_dir: Path) -> str:
   <td>{_format_seconds(clip.start)} - {_format_seconds(clip.end)}<br>{clip.duration:.2f}s</td>
   <td class="{clip.status}">{_status_label(clip.status)}</td>
   <td class="text">{html.escape(clip.text)}</td>
-  <td class="subtitle">{_render_subtitle(clip.subtitle)}</td>
+  <td class="subtitle">{_render_subtitle(clip.subtitle, clip.subtitle_visual)}</td>
   <td>{frames}</td>
   <td><ul>{issues}</ul></td>
 </tr>"""
@@ -588,6 +882,7 @@ def _clip_to_dict(clip: ClipQCResult, base_dir: Path) -> dict[str, Any]:
         "end": clip.end,
         "text": clip.text,
         "subtitle": clip.subtitle,
+        "subtitle_visual": clip.subtitle_visual,
         "status": clip.status,
         "video_path": clip.video_path,
         "audio_path": clip.audio_path,
@@ -600,7 +895,7 @@ def _issue_to_dict(issue: QCIssue) -> dict[str, str]:
     return {"severity": issue.severity, "code": issue.code, "message": issue.message}
 
 
-def _render_subtitle(subtitle: dict[str, Any]) -> str:
+def _render_subtitle(subtitle: dict[str, Any], visual: dict[str, Any]) -> str:
     if not subtitle.get("enabled", False):
         return '<span class="small">关闭</span>'
     checks = subtitle.get("checks") if isinstance(subtitle.get("checks"), dict) else {}
@@ -616,8 +911,34 @@ def _render_subtitle(subtitle: dict[str, Any]) -> str:
         f"重点字：{len(emphasis)}",
         f"花字：{len(decorative)}",
         f"OCR硬判：{'是' if checks.get('ocr_required', False) else '否'}",
+        f"画面可见：{_visual_label(visual.get('visible'))}",
+        f"安全区：{_visual_label(visual.get('safe_zone_ok'))}",
     ]
+    if visual.get("checked"):
+        rows.extend(
+            [
+                f"参考对比：{_visual_label(visual.get('has_reference'))}",
+                f"区内差异：{float(visual.get('max_safe_difference', 0.0)):.4f}",
+                f"差异抬升：{float(visual.get('max_difference_lift', 0.0)):.2f}",
+                f"区内边缘：{float(visual.get('max_safe_edge_density', 0.0)):.4f}",
+                f"区外/区内：{_subtitle_outside_ratio(visual):.2f}",
+            ]
+        )
     return "<br>".join(f'<span class="small">{row}</span>' for row in rows)
+
+
+def _visual_label(value: Any) -> str:
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return "未检查"
+
+
+def _subtitle_outside_ratio(visual: dict[str, Any]) -> float:
+    if visual.get("has_reference"):
+        return float(visual.get("max_outside_to_safe_difference_ratio", 0.0))
+    return float(visual.get("max_outside_to_safe_edge_ratio", 0.0))
 
 
 def _status_from_issues(issues: list[QCIssue]) -> str:
@@ -636,6 +957,14 @@ def _ratio(value: float, total: float) -> float:
     if total <= 0:
         return 0.0
     return min(value / total, 1.0)
+
+
+def _clamp_float(value: Any, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return minimum
+    return max(minimum, min(maximum, number))
 
 
 def _read_fps(stream: dict[str, Any] | None) -> float | None:

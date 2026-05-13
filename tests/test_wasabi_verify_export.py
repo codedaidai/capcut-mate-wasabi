@@ -1,6 +1,9 @@
 import json
 from pathlib import Path
 
+import imageio.v3 as iio
+import numpy as np
+
 from src.wasabi_jianying.verify_export import BLACK_RE, SILENCE_RE, MediaProbe, verify_export_video
 
 
@@ -69,12 +72,19 @@ def test_verify_export_video_writes_reports_and_flags_black_clip(tmp_path, monke
     def fake_extract(export_path, clip_index, start, duration, frames_dir, ffmpeg):
         frame = frames_dir / f"clip_{clip_index:03d}_mid.jpg"
         frame.parent.mkdir(parents=True, exist_ok=True)
-        frame.write_bytes(b"jpg")
+        _write_frame_with_subtitle_activity(frame)
+        return [frame]
+
+    def fake_reference(source_path, clip_index, source_start, duration, frames_dir, ffmpeg):
+        frame = frames_dir / f"clip_{clip_index:03d}_source_mid.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        iio.imwrite(frame, np.zeros((120, 160, 3), dtype=np.uint8))
         return [frame]
 
     monkeypatch.setattr("src.wasabi_jianying.verify_export._probe_media", fake_probe)
     monkeypatch.setattr("src.wasabi_jianying.verify_export._sum_detector_durations", fake_detector)
     monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_preview_frames", fake_extract)
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_reference_frames", fake_reference)
 
     result = verify_export_video(export, manifest)
 
@@ -139,8 +149,92 @@ def test_verify_export_warns_when_subtitle_contract_requires_ocr(tmp_path, monke
     monkeypatch.setattr("src.wasabi_jianying.verify_export._probe_media", fake_probe)
     monkeypatch.setattr("src.wasabi_jianying.verify_export._sum_detector_durations", lambda *args, **kwargs: 0.0)
     monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_preview_frames", lambda *args, **kwargs: [])
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_reference_frames", lambda *args, **kwargs: [])
 
     result = verify_export_video(export, manifest)
 
     assert result.warning_count == 1
     assert result.clip_results[0].issues[0].code == "SUBTITLE_OCR_REQUIRED"
+
+
+def test_verify_export_warns_when_subtitle_visual_activity_is_low(tmp_path, monkeypatch):
+    export = tmp_path / "export.mp4"
+    export.write_bytes(b"mp4")
+    source_video = tmp_path / "seg_00.mp4"
+    source_video.write_bytes(b"video")
+    source_audio = tmp_path / "sent_00.wav"
+    source_audio.write_bytes(b"audio")
+    manifest = tmp_path / "wasabi_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "draft_name": "demo",
+                "duration": 2_000_000,
+                "width": 1920,
+                "height": 1080,
+                "clips": [
+                    {
+                        "index": 0,
+                        "text": "字幕",
+                        "start": 0,
+                        "duration": 2_000_000,
+                        "end": 2_000_000,
+                        "video_path": str(source_video),
+                        "audio_path": str(source_audio),
+                        "checks": {"allow_black": False, "allow_static": False, "allow_silence": False},
+                        "subtitle": {
+                            "enabled": True,
+                            "text": "字幕",
+                            "segment_id": "text-1",
+                            "position": {
+                                "safe_zone": {"x_min": 0.08, "x_max": 0.92, "y_min": 0.68, "y_max": 0.93}
+                            },
+                            "runs": [{"text": "字幕", "role": "base", "style": "normal"}],
+                            "checks": {
+                                "require_visible": True,
+                                "check_safe_zone": True,
+                                "ocr_required": False,
+                                "min_text_edge_density": 0.004,
+                            },
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_probe(path: Path, ffprobe: str) -> MediaProbe:
+        return MediaProbe(path=path, duration=2.0, width=1920, height=1080, fps=30.0, has_video=True, has_audio=True)
+
+    def fake_extract(export_path, clip_index, start, duration, frames_dir, ffmpeg):
+        frame = frames_dir / "blank.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        iio.imwrite(frame, np.zeros((120, 160, 3), dtype=np.uint8))
+        return [frame]
+
+    def fake_reference(source_path, clip_index, source_start, duration, frames_dir, ffmpeg):
+        frame = frames_dir / "reference_blank.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        iio.imwrite(frame, np.zeros((120, 160, 3), dtype=np.uint8))
+        return [frame]
+
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._probe_media", fake_probe)
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._sum_detector_durations", lambda *args, **kwargs: 0.0)
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_preview_frames", fake_extract)
+    monkeypatch.setattr("src.wasabi_jianying.verify_export._extract_reference_frames", fake_reference)
+
+    result = verify_export_video(export, manifest)
+
+    assert result.warning_count == 1
+    assert result.clip_results[0].issues[0].code == "SUBTITLE_VISIBILITY_LOW"
+    assert result.clip_results[0].subtitle_visual["visible"] is False
+
+
+def _write_frame_with_subtitle_activity(path: Path) -> None:
+    image = np.zeros((120, 160, 3), dtype=np.uint8)
+    image[88:94, 32:128] = 255
+    image[98:104, 48:112] = 255
+    iio.imwrite(path, image)

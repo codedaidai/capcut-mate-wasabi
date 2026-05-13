@@ -137,6 +137,8 @@ uv run python -m src.wasabi_jianying.apply_effect \
 
 报告会展示每句的字幕合同摘要，包括位置、样式、runs、重点字、花字和 OCR 是否被要求硬判。花字/重点字字幕优先走工程合同和画面呈现检查，OCR 只适合作为弱参考。
 
+字幕画面检查不会识别文字内容，而是把导出抽帧和源素材同时间帧做对比，再分析字幕安全区的高对比文字活动：如果字幕区域相对源素材几乎没有变化，会标记为 `SUBTITLE_VISIBILITY_LOW`；如果安全区外也出现大量疑似字幕活动，会标记为 `SUBTITLE_SAFE_ZONE_ACTIVITY`。
+
 ```bash
 uv run python -m src.wasabi_jianying.verify_export \
   /path/to/export_proxy.mp4 \
