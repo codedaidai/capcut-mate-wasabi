@@ -101,6 +101,15 @@ uv run python -m src.wasabi_jianying.cli \
 
 输出草稿包含三条轨道：静音视频轨、TTS 配音轨、字幕轨。视频时长会按对应 TTS 时长对齐，适合让 AI 先自动铺好粗剪，再进剪映人工精修。
 
+导出时会在草稿目录生成 `wasabi_manifest.json`，记录每一句对应的时间范围和素材片段 ID。后续可以用这个清单继续精确修改草稿，例如给指定句子加特效：
+
+```bash
+uv run python -m src.wasabi_jianying.apply_effect \
+  /path/to/JianyingPro\ Drafts/my_wasabi_draft \
+  --effect DV界面 \
+  --clips 0,3,7
+```
+
 ### Docker 部署
 
 #### 快速部署（推荐）
