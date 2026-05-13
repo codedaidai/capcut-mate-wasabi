@@ -52,6 +52,7 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
             self.args = args
             self.kwargs = kwargs
             self.end = args[1].end
+            self.segment_id = f"segment-{len(calls)}"
 
     class FakeTimerange:
         def __init__(self, start, duration):
@@ -91,9 +92,11 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
     result = export_fine_cut_to_draft(fine_cut, drafts_folder=drafts, draft_name="demo")
 
     assert result.draft_path == drafts / "demo"
+    assert result.manifest_path == drafts / "demo" / "wasabi_manifest.json"
     assert result.clips_count == 1
     assert result.duration_us == 2_000_000
     assert ("create", str(drafts.resolve()), "demo", 1920, 1080, 30, True) in calls
     assert ("save",) in calls
     segment_tracks = [call[1] for call in calls if call[0] == "segment"]
     assert segment_tracks == ["wasabi_video", "wasabi_tts", "wasabi_subtitles"]
+    assert (drafts / "demo" / "wasabi_manifest.json").exists()

@@ -27,6 +27,7 @@ class FineCutClip:
 class ExportResult:
     draft_name: str
     draft_path: Path
+    manifest_path: Path
     clips_count: int
     duration_us: int
 
@@ -86,6 +87,7 @@ def export_fine_cut_to_draft(
         script.add_track(draft.TrackType.text, subtitle_track, relative_index=999)
 
     cursor_us = 0
+    manifest_clips: list[dict[str, Any]] = []
     for clip in clips:
         video = draft.VideoMaterial(str(clip.video_path))
         audio = draft.AudioMaterial(str(clip.audio_path))
@@ -110,6 +112,7 @@ def export_fine_cut_to_draft(
         audio_segment = draft.AudioSegment(audio, target_range, volume=1.0)
         script.add_segment(audio_segment, audio_track)
 
+        text_segment_id = None
         if include_subtitles and clip.text:
             text_segment = draft.TextSegment(
                 clip.text,
@@ -126,13 +129,50 @@ def export_fine_cut_to_draft(
                 shadow=draft.TextShadow(alpha=0.7, distance=4.0),
             )
             script.add_segment(text_segment, subtitle_track)
+            text_segment_id = text_segment.segment_id
+
+        manifest_clips.append(
+            {
+                "index": clip.index,
+                "text": clip.text,
+                "start": cursor_us,
+                "duration": duration_us,
+                "end": cursor_us + duration_us,
+                "video_path": str(clip.video_path),
+                "audio_path": str(clip.audio_path),
+                "video_segment_id": video_segment.segment_id,
+                "audio_segment_id": audio_segment.segment_id,
+                "text_segment_id": text_segment_id,
+            }
+        )
 
         cursor_us += duration_us
 
     script.save()
+    draft_path = output_root / name
+    manifest_path = draft_path / "wasabi_manifest.json"
+    _write_manifest(
+        manifest_path,
+        {
+            "version": 1,
+            "source": "wasabi_fine_cut",
+            "draft_name": name,
+            "duration": cursor_us,
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "tracks": {
+                "video": video_track,
+                "audio": audio_track,
+                "subtitles": subtitle_track if include_subtitles else None,
+            },
+            "clips": manifest_clips,
+        },
+    )
     return ExportResult(
         draft_name=name,
-        draft_path=output_root / name,
+        draft_path=draft_path,
+        manifest_path=manifest_path,
         clips_count=len(clips),
         duration_us=cursor_us,
     )
@@ -231,3 +271,10 @@ def _read_text(item: dict[str, Any]) -> str:
         if isinstance(value, str):
             return value.strip()
     return ""
+
+
+def _write_manifest(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+        file.write("\n")
