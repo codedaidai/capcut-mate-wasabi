@@ -133,11 +133,13 @@ uv run python -m src.wasabi_jianying.apply_effect \
 
 ### Wasabi 导出成片验片
 
-剪映导出低清代理 MP4 后，可以用 `wasabi_manifest.json` 对成片做逐句验片。第一版会检查导出时长、分辨率、源素材是否存在、每句是否黑屏、是否静帧卡住、是否大面积静音，并抽取每句的开头/中间/结尾截图生成报告。
+剪映导出低清代理 MP4 后，可以用 `wasabi_manifest.json` 对成片做逐句验片。第一版会检查导出时长、分辨率、源素材是否存在、每句是否黑屏、是否静帧卡住、是否大面积静音、画面是否匹配源 `seg_xx.mp4`，并抽取每句的开头/中间/结尾截图生成报告。
 
 报告会展示每句的字幕合同摘要，包括位置、样式、runs、重点字、花字和 OCR 是否被要求硬判。花字/重点字字幕优先走工程合同和画面呈现检查，OCR 只适合作为弱参考。
 
 字幕画面检查不会识别文字内容，而是把导出抽帧和源素材同时间帧做对比，再分析字幕安全区的高对比文字活动：如果字幕区域相对源素材几乎没有变化，会标记为 `SUBTITLE_VISIBILITY_LOW`；如果安全区外也出现大量疑似字幕活动，会标记为 `SUBTITLE_SAFE_ZONE_ACTIVITY`。
+
+源画面对照同样不看 OCR。它会把导出帧和源素材帧对齐比较，并避开字幕安全区；如果去掉字幕后画面仍然和源素材差异过大，会标记为 `VISUAL_SOURCE_MISMATCH`，用于抓错段、漏段、重复段。
 
 ```bash
 uv run python -m src.wasabi_jianying.verify_export \

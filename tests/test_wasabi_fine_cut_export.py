@@ -108,6 +108,10 @@ def test_export_fine_cut_to_draft_uses_local_tracks(tmp_path, monkeypatch):
         "allow_black": False,
         "allow_static": False,
         "allow_silence": False,
+        "check_source_visual": True,
+        "max_source_frame_difference": 0.18,
+        "max_source_mismatch_ratio": 0.66,
+        "fail_source_frame_difference": 0.35,
     }
     subtitle = manifest["clips"][0]["subtitle"]
     assert subtitle["enabled"] is True

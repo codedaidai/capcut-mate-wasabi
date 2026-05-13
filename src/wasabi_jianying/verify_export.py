@@ -51,6 +51,7 @@ class ClipQCResult:
     duration: float
     end: float
     text: str
+    source_visual: dict[str, Any]
     subtitle: dict[str, Any]
     subtitle_visual: dict[str, Any]
     status: str
@@ -174,9 +175,10 @@ def _verify_clip(
     source_start = _us_to_seconds(int(clip.get("source_video_start", 0)))
     reference_frames = (
         _extract_reference_frames(Path(video_path), index, source_start, duration, frames_dir, ffmpeg)
-        if export_probe.has_video and subtitle.get("enabled", False) and video_path and Path(video_path).exists()
+        if export_probe.has_video and video_path and Path(video_path).exists()
         else []
     )
+    source_visual = _check_source_visual(issues, checks, subtitle, frames, reference_frames)
     subtitle_visual = _check_subtitle_visual(issues, subtitle, frames, reference_frames)
     if export_probe.has_video and duration > 0:
         black_duration = _sum_detector_durations(
@@ -233,6 +235,7 @@ def _verify_clip(
         duration=duration,
         end=end,
         text=text,
+        source_visual=source_visual,
         subtitle=subtitle,
         subtitle_visual=subtitle_visual,
         status=status,
@@ -344,6 +347,78 @@ def _check_subtitle_contract(issues: list[QCIssue], subtitle: dict[str, Any]) ->
     checks = subtitle.get("checks") if isinstance(subtitle.get("checks"), dict) else {}
     if checks.get("ocr_required", False):
         issues.append(QCIssue("warn", "SUBTITLE_OCR_REQUIRED", "字幕合同要求 OCR；花字字幕不建议把 OCR 当硬判定。"))
+
+
+def _check_source_visual(
+    issues: list[QCIssue],
+    checks: dict[str, Any],
+    subtitle: dict[str, Any],
+    frames: list[Path],
+    reference_frames: list[Path],
+) -> dict[str, Any]:
+    enabled = bool(checks.get("check_source_visual", True))
+    max_frame_difference = float(checks.get("max_source_frame_difference", 0.18))
+    max_mismatch_ratio = float(checks.get("max_source_mismatch_ratio", 0.66))
+    fail_frame_difference = float(checks.get("fail_source_frame_difference", 0.35))
+    metrics: dict[str, Any] = {
+        "enabled": enabled,
+        "checked": False,
+        "matched": None,
+        "frames": [],
+        "thresholds": {
+            "max_source_frame_difference": max_frame_difference,
+            "max_source_mismatch_ratio": max_mismatch_ratio,
+            "fail_source_frame_difference": fail_frame_difference,
+        },
+    }
+    if not enabled:
+        return metrics
+
+    if not frames or not reference_frames:
+        issues.append(QCIssue("warn", "SOURCE_VISUAL_FRAMES_MISSING", "缺少导出帧或源素材帧，无法做源画面对照。"))
+        return metrics
+
+    frame_metrics: list[dict[str, Any]] = []
+    for frame, reference_frame in zip(frames, reference_frames):
+        try:
+            frame_metrics.append(_analyze_source_visual_frame(frame, reference_frame, subtitle))
+        except Exception as exc:  # pragma: no cover - defensive around image backend quirks.
+            issues.append(QCIssue("warn", "SOURCE_VISUAL_FRAME_READ_FAILED", f"源画面对照帧读取失败：{frame.name}：{exc}"))
+
+    if not frame_metrics:
+        issues.append(QCIssue("warn", "SOURCE_VISUAL_CHECK_EMPTY", "源画面对照没有得到有效帧。"))
+        return metrics
+
+    mismatches = [
+        item for item in frame_metrics
+        if float(item["masked_difference"]) > max_frame_difference
+    ]
+    mismatch_ratio = len(mismatches) / len(frame_metrics)
+    max_difference = max(float(item["masked_difference"]) for item in frame_metrics)
+    mean_difference = sum(float(item["masked_difference"]) for item in frame_metrics) / len(frame_metrics)
+    matched = mismatch_ratio <= max_mismatch_ratio and mean_difference <= max_frame_difference
+    metrics.update(
+        {
+            "checked": True,
+            "matched": matched,
+            "frames_compared": len(frame_metrics),
+            "mismatch_ratio": mismatch_ratio,
+            "max_difference": max_difference,
+            "mean_difference": mean_difference,
+            "frames": frame_metrics,
+        }
+    )
+
+    if not matched:
+        severity = "fail" if max_difference >= fail_frame_difference or mismatch_ratio >= 0.95 else "warn"
+        issues.append(
+            QCIssue(
+                severity,
+                "VISUAL_SOURCE_MISMATCH",
+                f"导出画面和源片段差异偏大，平均差异 {mean_difference:.4f}，最大差异 {max_difference:.4f}，不匹配帧占比 {mismatch_ratio:.0%}。",
+            )
+        )
+    return metrics
 
 
 def _check_subtitle_visual(
@@ -517,6 +592,25 @@ def _analyze_subtitle_frame(frame: Path, subtitle: dict[str, Any], *, reference_
     return result
 
 
+def _analyze_source_visual_frame(frame: Path, reference_frame: Path, subtitle: dict[str, Any]) -> dict[str, Any]:
+    gray = _read_gray_image(frame)
+    reference = _read_gray_image(reference_frame)
+    gray, reference = _align_gray_images(gray, reference)
+    height, width = gray.shape
+    mask = _source_compare_mask(width, height, subtitle)
+    masked_difference = _mean_abs_diff(gray[mask], reference[mask])
+    full_difference = _mean_abs_diff(gray, reference)
+    return {
+        "frame": frame.name,
+        "reference_frame": reference_frame.name,
+        "width": width,
+        "height": height,
+        "masked_difference": masked_difference,
+        "full_difference": full_difference,
+        "compared_pixel_ratio": float(mask.sum() / mask.size) if mask.size else 0.0,
+    }
+
+
 def _read_gray_image(path: Path):
     import imageio.v3 as iio
     import numpy as np
@@ -559,6 +653,22 @@ def _outside_region(canvas, sx1: int, sy1: int, sx2: int, sy2: int):
     mask = np.ones(canvas.shape, dtype=bool)
     mask[sy1:sy2, sx1:sx2] = False
     return canvas[mask]
+
+
+def _source_compare_mask(width: int, height: int, subtitle: dict[str, Any]):
+    import numpy as np
+
+    mask = np.ones((height, width), dtype=bool)
+    if subtitle.get("enabled", False):
+        x1, y1, x2, y2 = _safe_zone_bounds(width, height, subtitle)
+        pad_x = max(int(width * 0.04), 1)
+        pad_y = max(int(height * 0.04), 1)
+        x1 = max(0, x1 - pad_x)
+        x2 = min(width, x2 + pad_x)
+        y1 = max(0, y1 - pad_y)
+        y2 = min(height, y2 + pad_y)
+        mask[y1:y2, x1:x2] = False
+    return mask
 
 
 def _safe_zone_bounds(width: int, height: int, subtitle: dict[str, Any]) -> tuple[int, int, int, int]:
@@ -837,6 +947,7 @@ def _write_html_report(path: Path, result: ExportVerificationResult, export_prob
         <th>Clip</th>
         <th>时间</th>
         <th>状态</th>
+        <th>源画面对照</th>
         <th>文案</th>
         <th>字幕合同</th>
         <th>截图</th>
@@ -863,6 +974,7 @@ def _render_clip_row(clip: ClipQCResult, base_dir: Path) -> str:
   <td>{clip.index:03d}</td>
   <td>{_format_seconds(clip.start)} - {_format_seconds(clip.end)}<br>{clip.duration:.2f}s</td>
   <td class="{clip.status}">{_status_label(clip.status)}</td>
+  <td class="subtitle">{_render_source_visual(clip.source_visual)}</td>
   <td class="text">{html.escape(clip.text)}</td>
   <td class="subtitle">{_render_subtitle(clip.subtitle, clip.subtitle_visual)}</td>
   <td>{frames}</td>
@@ -881,6 +993,7 @@ def _clip_to_dict(clip: ClipQCResult, base_dir: Path) -> dict[str, Any]:
         "duration": clip.duration,
         "end": clip.end,
         "text": clip.text,
+        "source_visual": clip.source_visual,
         "subtitle": clip.subtitle,
         "subtitle_visual": clip.subtitle_visual,
         "status": clip.status,
@@ -893,6 +1006,25 @@ def _clip_to_dict(clip: ClipQCResult, base_dir: Path) -> dict[str, Any]:
 
 def _issue_to_dict(issue: QCIssue) -> dict[str, str]:
     return {"severity": issue.severity, "code": issue.code, "message": issue.message}
+
+
+def _render_source_visual(visual: dict[str, Any]) -> str:
+    if not visual.get("enabled", False):
+        return '<span class="small">关闭</span>'
+    rows = [
+        f"已检查：{_visual_label(visual.get('checked'))}",
+        f"匹配：{_visual_label(visual.get('matched'))}",
+    ]
+    if visual.get("checked"):
+        rows.extend(
+            [
+                f"对照帧：{int(visual.get('frames_compared', 0))}",
+                f"平均差异：{float(visual.get('mean_difference', 0.0)):.4f}",
+                f"最大差异：{float(visual.get('max_difference', 0.0)):.4f}",
+                f"不匹配：{float(visual.get('mismatch_ratio', 0.0)):.0%}",
+            ]
+        )
+    return "<br>".join(f'<span class="small">{row}</span>' for row in rows)
 
 
 def _render_subtitle(subtitle: dict[str, Any], visual: dict[str, Any]) -> str:
